@@ -27,6 +27,13 @@ namespace Pol2RunUO
             };
             polSpawnerMappingCommand.Handler = CommandHandler.Create<FileInfo, FileInfo>(ExportPolSpawnerMobileMapping);
             
+            Command exportPolSpawnersToXmlSpawners = new Command("export-spawner-xml")
+            {
+                new Option("-i", "Datafile to read, e.g. npcdesc.cfg") {Argument = new Argument<FileInfo>().ExistingOnly()},
+                new Option("-o", "XmlSpawner2 file output path") {Argument = new Argument<FileInfo>().LegalFilePathsOnly()}
+            };
+            exportPolSpawnersToXmlSpawners.Handler = CommandHandler.Create<FileInfo, FileInfo>(ExportPolSpawnersToXmlSpawners);
+            
             Command dumpPolDataCommand = new Command("dump-pol-data")
             {
                 new Option("-i", "Datafile to read, e.g. npcdesc.cfg") {Argument = new Argument<FileInfo>().ExistingOnly()},
@@ -36,6 +43,7 @@ namespace Pol2RunUO
 
             var root = new RootCommand();
             root.AddCommand(polSpawnerMappingCommand);
+            root.AddCommand(exportPolSpawnersToXmlSpawners);
             root.AddCommand(dumpPolDataCommand);
 
             return root;
@@ -58,6 +66,20 @@ namespace Pol2RunUO
             MappingsSerializer.Save(spawnerConverter.BuildPolToRunUoMobileMapping(), o.FullName);
             
             Console.WriteLine($"Output written to file://{o.FullName}");
+        }
+
+        private static void ExportPolSpawnersToXmlSpawners(FileSystemInfo i, FileSystemInfo o)
+        {
+            var spawnerConverter = new SpawnerConverter();
+            Console.WriteLine($"Importing data from {i.FullName}");
+
+            spawnerConverter.ImportPolData(i.FullName);
+            Console.WriteLine($"Read {spawnerConverter.PolData.Count()} spawnpoint entries");
+            Console.WriteLine($"Parsed {spawnerConverter.PolSpawners.Count} NPC spawnpoints");
+            
+            Console.WriteLine($"Writing out XmlSpawners to {o.FullName}");
+            
+            spawnerConverter.ExportToXmlSpawner(o.FullName);
         }
 
         private static void DumpPolDataToJson(FileInfo i, FileInfo o)

@@ -1,12 +1,16 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using Pol2RunUO.Algorithms;
 using Pol2RunUO.Readers;
 using Pol2RunUO.Mappings;
 using Server;
+using Server.Misc;
+using Server.Mobiles;
 
 namespace Pol2RunUO.Converters
 {
@@ -26,17 +30,83 @@ namespace Pol2RunUO.Converters
             PolSpawners = ReadPolSpawners();
         }
 
-        public void ExportToXmlSpawner(string xmlFile)
+        public void ExportToXmlSpawner(string xmlFile, Dictionary<string, string[]> mappings = null)
         {
+            mappings ??= BuildPolToRunUoMobileMapping();
+
+            var xmlSpawners = new ArrayList();
+            MapDefinitions.Configure();
             foreach (var polSpawner in PolSpawners)
             {
-                PolSpawnerToXmlSpawner(polSpawner);
+                xmlSpawners.Add(PolSpawnerToXmlSpawner(polSpawner, mappings));
             }
+
+            using var fs = new FileStream(xmlFile, FileMode.Create);
+
+            XmlSpawner.SaveSpawnList(xmlSpawners, fs);
         }
-        
-        public void PolSpawnerToXmlSpawner(PolSpawner polSpawner)
+
+        public XmlSpawner PolSpawnerToXmlSpawner(PolSpawner polSpawner, Dictionary<string, string[]> mappings)
         {
+            XmlSpawner xmlSpawner = new XmlSpawner(Serial.Zero)
+            {
+                Name = $"[POLConverted] SpawnPoint {polSpawner.Serial}",
+                X = polSpawner.X,
+                Y = polSpawner.Y,
+                Z = polSpawner.Z,
+                MaxCount = polSpawner.Max,
+                SpawnRange = polSpawner.AppearRange,
+                Running = false, // Stop the spawner from generating events, set the private field later
+                Group = polSpawner.SpawnInGroup,
+                DespawnTime = TimeSpan.FromSeconds(polSpawner.ExpireTime),
+                HomeRange = polSpawner.WanderRange,
+                MinDelay = TimeSpan.FromMinutes(polSpawner.Frequency),
+                MaxDelay = TimeSpan.FromMinutes(polSpawner.Frequency),
+                ProximityRange = -1,
+                ProximitySound = 500,
+                HomeRangeIsRelative = true,
+            };
             
+            
+            if (polSpawner.StartSpawningHours != polSpawner.EndSpawningHours)
+            {
+                xmlSpawner.TODStart = new TimeSpan(0, polSpawner.StartSpawningHours, 0, 0);
+                xmlSpawner.TODEnd = new TimeSpan(0, polSpawner.EndSpawningHours, 0, 0);
+            }
+
+            xmlSpawner.m_SpawnObjects = new ArrayList(
+                polSpawner.Template
+                    .Where(mappings.ContainsKey)
+                    .GroupBy(x => x)
+                    .OrderByDescending(group => group.Count())
+                    .Select(t => new XmlSpawner.SpawnObject(mappings[t.Key].FirstOrDefault() ?? $"MissingPolNpc.{t.Key}", t.Count()))
+                    .ToArray()
+            );
+
+            // We need to set these private fields with reflection
+            // Otherwise their public setters will trigger calls into a Server.Core that doesn't exist!
+            SetPrivateFieldValue(xmlSpawner, "m_Map", Map.Felucca);
+            SetPrivateFieldValue(xmlSpawner, "m_UniqueId", Guid.NewGuid().ToString());
+            SetPrivateFieldValue(xmlSpawner, "m_Running", true);
+
+            return xmlSpawner;
+        }
+
+        private static void SetPrivateFieldValue<T>(object obj, string propName, T val)
+        {
+            if (obj == null) throw new ArgumentNullException(nameof(obj));
+            Type t = obj.GetType();
+            FieldInfo fi = null;
+            while (fi == null && t != null)
+            {
+                fi = t.GetField(propName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                t = t.BaseType;
+            }
+
+            if (fi == null)
+                throw new ArgumentOutOfRangeException(nameof(propName),
+                    $"Field {propName} was not found in Type {obj.GetType().FullName}");
+            fi.SetValue(obj, val);
         }
 
         public Dictionary<string, string[]> BuildPolToRunUoMobileMapping()
@@ -68,19 +138,19 @@ namespace Pol2RunUO.Converters
         {
             _assemblyTypes ??= from a in AppDomain.CurrentDomain.GetAssemblies()
                 from t in a.GetTypes()
-                where t.FullName != null 
-                      && t.FullName.Contains(".Mobiles.") 
+                where t.FullName != null
+                      && t.FullName.Contains(".Mobiles.")
                       && !t.FullName.Contains('+')
                       && !t.FullName.Contains("Summoned")
                 select t;
-            
+
             // Remove non-alpha chars
             template = new string(template.ToCharArray().Where(char.IsLetter).ToArray());
 
             return from t in _assemblyTypes
                 where t.FullName!.Contains(template, StringComparison.InvariantCultureIgnoreCase)
                 orderby LevenshteinDistance.Calculate(template, t.Name)
-                select t.FullName;
+                select t.Name;
         }
 
         private List<PolSpawner> ReadPolSpawners()
@@ -90,11 +160,11 @@ namespace Pol2RunUO.Converters
             foreach (var spawnerItem in PolData)
             {
                 using TextReader packedReader = new StringReader(spawnerItem["CProp_PointData"]);
-                var unpacked = (object[])PolDataFileReader.UnpackElement(packedReader);
+                var unpacked = (object[]) PolDataFileReader.UnpackElement(packedReader);
 
-                if(!string.Equals((string)unpacked[0], "NPC", StringComparison.InvariantCultureIgnoreCase))
+                if (!string.Equals((string) unpacked[0], "NPC", StringComparison.InvariantCultureIgnoreCase))
                     continue;
-                
+
                 var templates = new List<string>();
 
                 switch (unpacked[1])
@@ -114,6 +184,7 @@ namespace Pol2RunUO.Converters
                         {
                             templates.Add(t);
                         }
+
                         break;
                     }
 
@@ -121,9 +192,10 @@ namespace Pol2RunUO.Converters
                     {
                         foreach (object obj in arr)
                         {
-                            if(obj is string s)
+                            if (obj is string s)
                                 templates.Add(s);
                         }
+
                         break;
                     }
                 }
@@ -132,6 +204,7 @@ namespace Pol2RunUO.Converters
                 {
                     PolSpawner spawner = new PolSpawner();
 
+                    spawner.Serial = spawnerItem["Serial"];
                     spawner.Name = spawnerItem.ContainsKey("Name") ? spawnerItem["Name"] : "Spawner";
                     spawner.X = ParseIntWithDefault(spawnerItem["X"]);
                     spawner.Y = ParseIntWithDefault(spawnerItem["Y"]);
@@ -155,7 +228,6 @@ namespace Pol2RunUO.Converters
                 {
                     Console.WriteLine("Failed to parse spawner {0}", spawnerItem["Serial"]);
                 }
-
             }
 
             return spawners;

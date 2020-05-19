@@ -4,6 +4,7 @@ namespace Pol2RunUO.Converters
 {
     internal struct PolSpawner
     {
+        public string Serial;
         public string Name;
         public int X;
         public int Y;
