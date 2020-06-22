@@ -1,0 +1,59 @@
+<#@ template language="C#" #>
+<#@ import namespace="System.Text" #>
+<#@ import namespace="System.Collections.Generic" #>
+<#@ parameter name="className" type="System.String" #>
+<#@ parameter name="fields" type="System.Collections.Generic.SortedDictionary<string,string>" #>
+<#@ parameter name="equip" type="System.Collections.Generic.Dictionary<string, List<string>>" #>
+<#@ parameter name="overrides" type="System.Collections.Generic.List<string>" #>
+
+
+using System;
+using System.Collections.Generic;
+using Server;
+using Server.Ethics;
+using Server.Misc;
+using Server.Items;
+using static Server.Mobiles.CreatureProp;
+
+namespace Server.Mobiles
+{
+    public class <#= className #> : BaseCreature
+    {
+        static <#= className #>() => CreatureProperties.Register<<#= className #>>(new CreatureProperties
+        {
+<# foreach ((string key, string value) in fields) {#>
+            <#= key #> = <#= value #>,
+<# } #>  
+        });
+
+        [Constructable]
+        public <#= className #>() : base(CreatureProperties.Get<<#= className #>>())
+        {
+            // Add customization here
+
+<# foreach ((string name, List<string> statements) in equip) {#>
+<# foreach (string stmt in statements) {#>
+            <#= stmt #>
+<# } #>  
+<# } #>  
+        }
+
+        public <#= className #>(Serial serial) : base(serial) {}
+
+<# foreach (string over in overrides) {#>
+        <#= over #>
+<# } #>  
+
+        public override void Serialize(GenericWriter writer)
+        {
+            base.Serialize(writer);
+            writer.Write((int) 0);
+        }
+
+        public override void Deserialize(GenericReader reader)
+        {
+            base.Deserialize(reader);
+            int version = reader.ReadInt();
+        }
+    }
+}

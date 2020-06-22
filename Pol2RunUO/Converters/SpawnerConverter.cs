@@ -16,7 +16,7 @@ namespace Pol2RunUO.Converters
 {
     internal class SpawnerConverter
     {
-        private IEnumerable<Type> _assemblyTypes;
+        private static IEnumerable<Type> _assemblyTypes;
 
         public List<PolSpawner> PolSpawners { get; private set; }
 
@@ -134,7 +134,7 @@ namespace Pol2RunUO.Converters
             return mappings;
         }
 
-        private IEnumerable<string> FindNearestMobileByTypeName(string template)
+        public static IEnumerable<string> FindNearestMobileByTypeName(string template)
         {
             _assemblyTypes ??= from a in AppDomain.CurrentDomain.GetAssemblies()
                 from t in a.GetTypes()
