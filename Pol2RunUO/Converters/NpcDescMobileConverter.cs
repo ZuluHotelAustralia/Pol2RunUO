@@ -35,8 +35,9 @@ namespace Pol2RunUO.Converters
                 select new KeyValuePair<Type, FlipableAttribute>(t,
                     attributes.Cast<FlipableAttribute>().FirstOrDefault())).ToDictionary(x => x.Key, x => x.Value);
 
+        private static Dictionary<string, string> NpcDescToClassName;
+        
         private readonly Dictionary<string, string> _entry;
-
         private readonly List<string> _overrides = new List<string>();
         private readonly SortedDictionary<string, string> _props = new SortedDictionary<string, string>();
         private readonly Dictionary<string, List<string>> _equip = new Dictionary<string, List<string>>();
@@ -49,7 +50,7 @@ namespace Pol2RunUO.Converters
             {"animal", AIType.AI_Animal},
             {"archerkillpcs", AIType.AI_Archer},
             {"barker", AIType.AI_Animal},
-            {"explosionkillpcs", AIType.AI_Melee},
+            {"explosionkillpcs", AIType.AI_Archer},
             {"firebreather", AIType.AI_Melee},
             {"killpcs", AIType.AI_Melee},
             {"killpcssprinters", AIType.AI_Melee},
@@ -62,6 +63,10 @@ namespace Pol2RunUO.Converters
             {"vortexai", AIType.AI_Melee},
             {"wolf", AIType.AI_Melee},
             {"goodcaster", AIType.AI_Mage},
+            {"elfspellkillpcs", AIType.AI_Mage},
+            {"daves_healer", AIType.AI_Healer},
+            {"firebreatherspells", AIType.AI_Melee},
+
         };
 
         private static readonly Dictionary<string, ResistanceType> ProtToResistance =
@@ -77,6 +82,8 @@ namespace Pol2RunUO.Converters
         public static void Convert(List<Dictionary<string, string>> npcCfg, List<Dictionary<string, string>> equipCfg,
             List<Dictionary<string, string>> itemCfg, DirectoryInfo outputDir)
         {
+            NpcDescToClassName = npcCfg.ToDictionary(e => e["DataElementId"], e => GetClassName(e["Name"]));
+            
             foreach (var entry in npcCfg)
             {
                 var instance = new NpcDescMobileConverter(entry);
@@ -114,8 +121,8 @@ namespace Pol2RunUO.Converters
             List<Dictionary<string, string>> itemCfg)
         {
             ProcessNpcBaseValues();
-            ProcessNpcScript();
             ProcessNpcEquipEntry(equipCfg, itemCfg);
+            ProcessNpcScript();
             ProcessNpcOverrides();
 
 
@@ -247,8 +254,8 @@ namespace Pol2RunUO.Converters
                     FindTypeForObjType(graphic, out var itemType))
                 {
 
-                    if (graphic == "0x0ec4") // Skinning Knife
-                        continue;
+                    // if (graphic == "0x0ec4") // Skinning Knife
+                    //     continue;
                     
                     string name;
 
@@ -259,31 +266,59 @@ namespace Pol2RunUO.Converters
                     
                     name = char.ToLowerInvariant(name[0]) + name.Substring(1);
 
-                    statements.Add($"var {name} = new {itemType.Name}();");
-                    statements.Add($"{name}.Movable = false;");
+                    statements.Add($"AddItem(new {itemType.Name}");
+                    statements.Add("{");
 
-                    foreach (var (key, value) in item)
+                    void Add(string p, string s) => statements.Add($"    {p} = {s},");
+                    Add("Movable", "false");
+
+                    foreach (var (prop, str) in item)
                     {
-                        switch (key.ToLowerInvariant())
+                        var value = str.Trim();
+                        switch (prop.ToLowerInvariant())
                         {
                             case "desc":
-                                statements.Add($"{name}.Name = \"{value.Trim()}\";");
+                                Add("Name",$"\"{value}\"");
                                 break;
                             case "color":
-                                statements.Add($"{name}.Hue = {value.Trim()};");
+                                Add("Hue", value);
                                 break;
                             case "ar":
                                 if(itemType.IsSubclassOf(typeof(BaseArmor)))
-                                    statements.Add($"{name}.BaseArmorRating = {value.Trim()};");
+                                    Add("BaseArmorRating", value);
                                 break;
                             case "maxhp":
-                                statements.Add($"{name}.MaxHitPoints = {value.Trim()};");
-                                statements.Add($"{name}.HitPoints = {value.Trim()};");
+                                Add("MaxHitPoints", value);
+                                Add("HitPoints", value);
                                 break;
+                            case "speed":
+                                Add("Speed", value);
+                                break;
+                            case "cprop_normalrange":
+                            case "maxrange":
+                                Add("MaxRange", ToDigitString(value));
+                                _props.TryAdd("FightRange", ToDigitString(value));
+                                break;
+                            case "hitsound":
+                                Add("HitSound", value);
+                                break;
+                            case "misssound":
+                                Add("MissSound" ,value);
+                                break;
+                            case "anim":
+                                Add("Animation",$"(WeaponAnimation){value}");
+                                break;
+                            case "attribute":
+                                if (SkillNames.Contains(value) && Enum.TryParse(value, true, out SkillName skill))
+                                    Add("Skill",$"SkillName.{skill}");
+                                break;
+                            case "projectileanim":
+                                Add("EffectID", value);
+                                break;
+
                         }
                     }
-
-                    statements.Add($"AddItem({name});");
+                    statements.Add("});");
 
                     _equip.Add(name, statements);
                 }
@@ -360,8 +395,7 @@ namespace Pol2RunUO.Converters
 
                         if (value.Contains("banish"))
                         {
-                            _props.TryAdd("WeaponAbility", "new SpellStrike<Server.Spells.Fifth.DispelFieldSpell>()");
-                            _props.TryAdd("WeaponAbilityChance", "0.5");
+                            _props.TryAdd("AutoDispel", "true");
                         }
 
                         break;
@@ -447,11 +481,13 @@ namespace Pol2RunUO.Converters
 
             switch (script)
             {
+                case "firebreatherspells":
                 case "firebreather":
                     _props.TryAdd("HasBreath", "true");
                     break;
                 case "killpcsTeleporterfast":
                 case "killpcssprinters":
+                case "fastspiders":
                     _props.TryAdd("ActiveSpeed", "0.150");
                     _props.TryAdd("PassiveSpeed", "0.300");
                     break;
@@ -464,15 +500,25 @@ namespace Pol2RunUO.Converters
 
         private void ProcessNpcBaseValues()
         {
+            _props.TryAdd("AlwaysAttackable", "true");
+            
             foreach (var (key, value) in _entry)
             {
                 switch (key.ToLowerInvariant())
                 {
                     case "alignment":
-                        if (value == "evil")
-                            _props.TryAdd("AlwaysMurderer", "true");
-                        else if (value == "good")
-                            _props.TryAdd("InitialInnocent", "true");
+                        switch (value)
+                        {
+                            case "evil":
+                                _props.TryAdd("AlwaysMurderer", "true");
+                                _props.Remove("AlwaysAttackable");
+                                break;
+                            case "good":
+                                _props.TryAdd("InitialInnocent", "true");
+                                _props.Remove("AlwaysAttackable");
+                                break;
+                        }
+
                         break;
                     case "movemode":
                         if (value.Contains('S'))
@@ -482,7 +528,7 @@ namespace Pol2RunUO.Converters
                         break;
                     case "name":
                         _props.TryAdd("Name", $"\"{value}\"");
-                        _props.TryAdd("CorpseNameOverride", $"\"corpse of {value}\"");
+                        _props.TryAdd("CorpseNameOverride", $"\"corpse of {value}\"".Replace("<random> the", "a"));
                         break;
                     case "objtype":
                         _props.TryAdd("Body", value);
@@ -511,6 +557,13 @@ namespace Pol2RunUO.Converters
                         break;
                     case "ar":
                         _props.TryAdd("VirtualArmor", value);
+                        break;
+                    case "cprop_rise":
+                        if(NpcDescToClassName.TryGetValue(value.Trim().Substring(1), out var className))
+                            _props.TryAdd("RiseCreatureType", $"typeof({className})");
+                        break;
+                    case "cprop_risedelay":
+                        _props.TryAdd("RiseCreatureDelay", $"TimeSpan.FromSeconds({ToDigitString(value)})");
                         break;
                     case "tameskill":
                         _props.TryAdd("MinTameSkill", value);
