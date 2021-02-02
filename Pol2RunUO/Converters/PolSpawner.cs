@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using Server;
 
 namespace Pol2RunUO.Converters
 {
@@ -22,5 +24,25 @@ namespace Pol2RunUO.Converters
         public int StartSpawningHours;
         public int EndSpawningHours;
         public string Notes;
+    }
+    
+    internal partial class Spawner
+    {
+        public string Type { get; set; } = "Spawner";
+        public long[] Location { get; set; }
+        public string Map { get; set; } = "Felucca";
+        public long Count { get; set; }
+        public List<Entry> Entries { get; set; }
+        public long HomeRange { get; set; }
+        public long WalkingRange { get; set; }
+        public string MaxDelay { get; set; }
+        public string MinDelay { get; set; }
+    }
+
+    internal partial class Entry
+    {
+        public long MaxCount { get; set; }
+        public string Name { get; set; }
+        public long Probability { get; set; }
     }
 }

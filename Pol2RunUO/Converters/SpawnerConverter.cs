@@ -4,19 +4,22 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Pol2RunUO.Algorithms;
 using Pol2RunUO.Readers;
 using Pol2RunUO.Mappings;
 using Server;
+using Server.Json;
 using Server.Misc;
 using Server.Mobiles;
+using Server.Spells;
+using static Pol2RunUO.Converters.Helpers;
 
 namespace Pol2RunUO.Converters
 {
     internal class SpawnerConverter
     {
-        private static IEnumerable<Type> _assemblyTypes;
 
         public List<PolSpawner> PolSpawners { get; private set; }
 
@@ -30,66 +33,51 @@ namespace Pol2RunUO.Converters
             PolSpawners = ReadPolSpawners();
         }
 
-        public void ExportToXmlSpawner(string xmlFile, Dictionary<string, string[]> mappings = null)
+        public void ExportToXmlSpawner(string file, Dictionary<string, string[]> mappings = null)
         {
             mappings ??= BuildPolToRunUoMobileMapping();
 
-            var xmlSpawners = new ArrayList();
             MapDefinitions.Configure();
-            foreach (var polSpawner in PolSpawners)
+            var spawners = PolSpawners.Select(polSpawner => PolSpawnerToJsonSpawner(polSpawner, mappings)).ToList();
+            
+            var options = new JsonSerializerOptions
             {
-                xmlSpawners.Add(PolSpawnerToXmlSpawner(polSpawner, mappings));
-            }
-
-            using var fs = new FileStream(xmlFile, FileMode.Create);
-
-            XmlSpawner.SaveSpawnList(xmlSpawners, fs);
-        }
-
-        public XmlSpawner PolSpawnerToXmlSpawner(PolSpawner polSpawner, Dictionary<string, string[]> mappings)
-        {
-            XmlSpawner xmlSpawner = new XmlSpawner(Serial.Zero)
-            {
-                Name = $"[POLConverted] SpawnPoint {polSpawner.Serial}",
-                X = polSpawner.X,
-                Y = polSpawner.Y,
-                Z = polSpawner.Z,
-                MaxCount = polSpawner.Max,
-                SpawnRange = polSpawner.AppearRange,
-                Running = false, // Stop the spawner from generating events, set the private field later
-                Group = polSpawner.SpawnInGroup,
-                DespawnTime = TimeSpan.FromSeconds(polSpawner.ExpireTime),
-                HomeRange = polSpawner.WanderRange,
-                MinDelay = TimeSpan.FromMinutes(polSpawner.Frequency),
-                MaxDelay = TimeSpan.FromMinutes(polSpawner.Frequency),
-                ProximityRange = -1,
-                ProximitySound = 500,
-                HomeRangeIsRelative = true,
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                // WriteIndented = true
             };
             
+            var jsonString = JsonSerializer.Serialize(spawners, options);
             
-            if (polSpawner.StartSpawningHours != polSpawner.EndSpawningHours)
+            File.WriteAllText(file, jsonString);
+        }
+
+        public Spawner PolSpawnerToJsonSpawner(PolSpawner polSpawner, Dictionary<string, string[]> mappings)
+        {
+            var delay = TimeSpan.FromMinutes(polSpawner.Frequency);
+
+            var spawner = new Spawner
             {
-                xmlSpawner.TODStart = new TimeSpan(0, polSpawner.StartSpawningHours, 0, 0);
-                xmlSpawner.TODEnd = new TimeSpan(0, polSpawner.EndSpawningHours, 0, 0);
-            }
+                Location = new long[] {polSpawner.X, polSpawner.Y, polSpawner.Z},
+                Count = polSpawner.Max,
+                HomeRange = polSpawner.AppearRange,
+                WalkingRange = polSpawner.WanderRange,
+                MinDelay = delay.ToString(),
+                MaxDelay = (delay + delay / 4).ToString(),
+            };
 
-            xmlSpawner.m_SpawnObjects = new ArrayList(
-                polSpawner.Template
-                    .Where(mappings.ContainsKey)
-                    .GroupBy(x => x)
-                    .OrderByDescending(group => group.Count())
-                    .Select(t => new XmlSpawner.SpawnObject(mappings[t.Key].FirstOrDefault() ?? $"MissingPolNpc.{t.Key}", t.Count()))
-                    .ToArray()
-            );
+            spawner.Entries = polSpawner.Template
+                .Where(mappings.ContainsKey)
+                .GroupBy(x => x)
+                .OrderByDescending(group => group.Count())
+                .Select(t => new Entry
+                {
+                    MaxCount = t.Count(),
+                    Name = mappings[t.Key].FirstOrDefault() ?? $"MissingPolNpc.{t.Key}",
+                    Probability = 100
+                })
+                .ToList();
 
-            // We need to set these private fields with reflection
-            // Otherwise their public setters will trigger calls into a Server.Core that doesn't exist!
-            SetPrivateFieldValue(xmlSpawner, "m_Map", Map.Felucca);
-            SetPrivateFieldValue(xmlSpawner, "m_UniqueId", Guid.NewGuid().ToString());
-            SetPrivateFieldValue(xmlSpawner, "m_Running", true);
-
-            return xmlSpawner;
+            return spawner;
         }
 
         private static void SetPrivateFieldValue<T>(object obj, string propName, T val)
@@ -121,37 +109,20 @@ namespace Pol2RunUO.Converters
             var distinct = allTemplates.Distinct()
                 .Where(s => !string.IsNullOrWhiteSpace(s) && s.Length > 1);
 
-            var mappings = new Dictionary<string, string[]>();
+            var mappings = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
             foreach (var template in distinct)
             {
                 // Force the loading of the RunUO assembly so we can reflect its types
-                Type _ = typeof(ScriptCompiler);
+                Type _ = typeof(SpellRegistry);
 
                 var mobileTypes = FindNearestMobileByTypeName(template);
-                mappings.Add(template, mobileTypes.ToArray());
+                mappings.TryAdd(template, mobileTypes.ToArray());
             }
 
             return mappings;
         }
 
-        public static IEnumerable<string> FindNearestMobileByTypeName(string template)
-        {
-            _assemblyTypes ??= from a in AppDomain.CurrentDomain.GetAssemblies()
-                from t in a.GetTypes()
-                where t.FullName != null
-                      && t.FullName.Contains(".Mobiles.")
-                      && !t.FullName.Contains('+')
-                      && !t.FullName.Contains("Summoned")
-                select t;
 
-            // Remove non-alpha chars
-            template = new string(template.ToCharArray().Where(char.IsLetter).ToArray());
-
-            return from t in _assemblyTypes
-                where t.FullName!.Contains(template, StringComparison.InvariantCultureIgnoreCase)
-                orderby LevenshteinDistance.Calculate(template, t.Name)
-                select t.Name;
-        }
 
         private List<PolSpawner> ReadPolSpawners()
         {

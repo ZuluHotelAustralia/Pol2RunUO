@@ -3,125 +3,128 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
-using System.Text;
-using System.Text.RegularExpressions;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Pol2RunUO.Mappings;
 using Server;
 using Server.Items;
 using Server.Mobiles;
 using Server.Spells;
-using static System.Globalization.CultureInfo;
+using static Pol2RunUO.Converters.Helpers;
 
 namespace Pol2RunUO.Converters
 {
     internal class NpcDescMobileConverter
     {
-        private static readonly Func<string, string> ToTitleCase = CurrentCulture.TextInfo.ToTitleCase;
-
-        private static readonly Func<string, string> ToCamelCase = arg =>
-        {
-            arg = ToTitleCase(arg);
-            arg = char.ToLowerInvariant(arg[0]) + arg.Substring(1);
-            return arg;
-        };
-
-        private static readonly string[] SkillNames = Enum.GetNames(typeof(SkillName));
-
-        private static readonly Dictionary<Type, FlipableAttribute> TypesWithFlippable =
-            (from a in AppDomain.CurrentDomain.GetAssemblies()
-                from t in a.GetTypes()
-                let attributes = t.GetCustomAttributes(typeof(FlipableAttribute), false)
-                where attributes != null && attributes.Length > 0
-                select new KeyValuePair<Type, FlipableAttribute>(t,
-                    attributes.Cast<FlipableAttribute>().FirstOrDefault())).ToDictionary(x => x.Key, x => x.Value);
-
-        private static Dictionary<string, string> NpcDescToClassName;
-        
         private readonly Dictionary<string, string> _entry;
         private readonly List<string> _overrides = new List<string>();
-        private readonly SortedDictionary<string, string> _props = new SortedDictionary<string, string>();
-        private readonly Dictionary<string, List<string>> _equip = new Dictionary<string, List<string>>();
+
+        private readonly SortedDictionary<string, string> _props =
+            new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        private readonly Dictionary<string, List<string>> _equip =
+            new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
 
         private readonly Dictionary<SkillName, string> _skills = new Dictionary<SkillName, string>();
         private readonly Dictionary<ResistanceType, string> _resistances = new Dictionary<ResistanceType, string>();
+        private readonly List<string> _spells = new List<string>();
 
-        private static readonly Dictionary<string, AIType> NpcScriptToAiType = new Dictionary<string, AIType>
+        public static void Convert(DirectoryInfo outputDir)
         {
-            {"animal", AIType.AI_Animal},
-            {"archerkillpcs", AIType.AI_Archer},
-            {"barker", AIType.AI_Animal},
-            {"explosionkillpcs", AIType.AI_Archer},
-            {"firebreather", AIType.AI_Melee},
-            {"killpcs", AIType.AI_Melee},
-            {"killpcssprinters", AIType.AI_Melee},
-            {"killpcsTeleporter", AIType.AI_Melee},
-            {"killpcsTeleporterfast", AIType.AI_Melee},
-            {"slime", AIType.AI_Melee},
-            {"spellkillpcs", AIType.AI_Mage},
-            {"spellkillpcsTeleporter", AIType.AI_Mage},
-            {"spiders", AIType.AI_Melee},
-            {"vortexai", AIType.AI_Melee},
-            {"wolf", AIType.AI_Melee},
-            {"goodcaster", AIType.AI_Mage},
-            {"elfspellkillpcs", AIType.AI_Mage},
-            {"daves_healer", AIType.AI_Healer},
-            {"firebreatherspells", AIType.AI_Melee},
-
-        };
-
-        private static readonly Dictionary<string, ResistanceType> ProtToResistance =
-            new Dictionary<string, ResistanceType>
+            var duplicates = new List<Dictionary<string, string>>();
+            foreach (var entry in PolData.NpcDesc)
             {
-                {"CProp_FireProtection", ResistanceType.Fire},
-                {"CProp_WaterProtection", ResistanceType.Cold},
-                {"CProp_PermPoisonImmunity", ResistanceType.Poison},
-                {"CProp_PhysicalProtection", ResistanceType.Physical},
-                {"CProp_AirProtection", ResistanceType.Energy},
-            };
+                var className = GetClassName(entry["Name"]);
+                if (className != null && entry["DataElementId"] != null &&
+                    !NpcDescToClassName.TryAdd(entry["DataElementId"], GetClassName(entry["Name"])))
+                    duplicates.Add(entry);
+            }
 
-        public static void Convert(List<Dictionary<string, string>> npcCfg, List<Dictionary<string, string>> equipCfg,
-            List<Dictionary<string, string>> itemCfg, DirectoryInfo outputDir)
-        {
-            NpcDescToClassName = npcCfg.ToDictionary(e => e["DataElementId"], e => GetClassName(e["Name"]));
-            
-            foreach (var entry in npcCfg)
+            foreach (var entry in PolData.NpcDesc.Except(duplicates))
             {
                 var instance = new NpcDescMobileConverter(entry);
                 var className = GetClassName(entry["Name"]);
-
-                var exists = SpawnerConverter.FindNearestMobileByTypeName(className).Any();
-                if (exists)
-                {
-                    Console.WriteLine(
-                        $"Skipping {className} as a conflicting mobile with the same name already exists.");
-                    continue;
-                }
-
-                var output = instance.Convert(className, equipCfg, itemCfg);
+                
+                var output = instance.Convert(className);
 
                 if (output == null)
                 {
                     Console.WriteLine($"Skipping {className} conversion returned a null result");
                     continue;
                 }
+                
+                string subDirectory = "";
+                if (instance._props.TryGetValue("CreatureType", out var creatureType))
+                {
+                    subDirectory = creatureType.Split('.')[1];
+                    
+                    var dirInfo = new DirectoryInfo($"{outputDir.FullName}{subDirectory}");
+                    if (!dirInfo.Exists)
+                        dirInfo.Create();
+                }
 
+                var fileName = $"{outputDir.FullName}{subDirectory}/{className}.cs";
 
-                File.WriteAllText($"{outputDir.FullName}/{className}.cs", output);
+                if (string.IsNullOrEmpty(className))
+                {
+                    Console.WriteLine($"Skipping {entry["DataElementId"]}, classname is empty");
+                    continue;
+                }
+
+                var exists = MobileTypes.Where(t => t.Name.Equals(className, StringComparison.InvariantCultureIgnoreCase)).ToArray();
+                
+                if (exists.Any() && !File.Exists(fileName))
+                {
+
+                    if (subDirectory == "Animal" || exists.Any(t => t.IsSubclassOf(typeof(BaseMount))))
+                    {
+                        Console.WriteLine(
+                            $"Skipping {className} ({entry["DataElementId"]}) as a conflicting mobile with the same name already exists.");
+                        continue;
+                    }
+
+                    DirectoryInfo dir = outputDir;
+                    string projectRoot = null;
+                    while (projectRoot == null)
+                    {
+                        dir = dir.Parent;
+                        projectRoot = GetAllFiles(dir.FullName, "*.csproj").FirstOrDefault();
+                    }
+                    
+                    var conflictingFileName = GetAllFiles(dir.FullName, $"{className}.cs")
+                        .FirstOrDefault(f => !f.Contains(outputDir.FullName) && !f.Contains("Mounts") && f.Contains("Mobiles"));
+                    
+                    
+                    if (conflictingFileName != null)
+                    {
+                        var text = File.ReadAllText(conflictingFileName);
+
+                        text = text.Replace( $"class {className}", $"class {className}Old");
+                        text = text.Replace( $"{className}(", $"{className}Old(");
+                    
+                        File.WriteAllText(conflictingFileName, text);
+                        File.Move(conflictingFileName, conflictingFileName.Replace(className, $"{className}Old"));
+                    }
+                    else
+                    {
+                        continue;
+                    }
+                }
+
+                File.WriteAllText(fileName, output);
 
                 Console.WriteLine($"Processed {className}");
             }
         }
+
 
         private NpcDescMobileConverter(Dictionary<string, string> entry)
         {
             _entry = entry;
         }
 
-        public string Convert(string className, List<Dictionary<string, string>> equipCfg,
-            List<Dictionary<string, string>> itemCfg)
+        public string Convert(string className)
         {
             ProcessNpcBaseValues();
-            ProcessNpcEquipEntry(equipCfg, itemCfg);
+            ProcessNpcEquipEntry();
             ProcessNpcScript();
             ProcessNpcOverrides();
 
@@ -129,6 +132,12 @@ namespace Pol2RunUO.Converters
             if (!_props.ContainsKey("AiType"))
             {
                 Console.WriteLine($"Skipping {className} as it has no assignable AiType");
+                return null;
+            }
+
+            if (className == null)
+            {
+                Console.WriteLine($"Skipping as it has no class name: {_entry["Name"]}");
                 return null;
             }
 
@@ -142,64 +151,50 @@ namespace Pol2RunUO.Converters
                     {"overrides", _overrides}
                 }
             };
-            npc.Initialize();
-            string output = npc.TransformText();
+            try
+            {
+                npc.Initialize();
+                string output = npc.TransformText();
+                return output;
+            }
+            catch (Exception e)
+            {
+                e = e;
+            }
 
-            return output;
-        }
-
-        private static string ToDigitString(string input) => new string(input.Where(char.IsDigit).ToArray());
-
-        private static string GetClassName(string value)
-        {
-            var removeWords = new[] {"The", "<random>"};
-
-            value = value.Replace("<random>", "");
-            value = value.Replace(",", "");
-            value = value.Replace("-", " ");
-
-
-            value = Regex.Replace(value, "^(an )|(a )", "");
-
-            var split = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            value = string.Join("", split.Select(ToTitleCase).Where(x => !removeWords.Contains(x)));
-
-            return value;
+            return null;
         }
 
         private void ProcessNpcOverrides()
         {
-            // if(entry.ContainsKey())
         }
 
-        private List<Dictionary<string, string>> GetItemDescEntries(List<Dictionary<string, string>> itemCfg,
-            List<string> equipCfg)
+        private List<Dictionary<string, string>> GetItemDescEntries(List<string> equipEntry)
         {
             var equip = new List<Dictionary<string, string>>();
 
-            foreach (var value in equipCfg)
+            foreach (var value in equipEntry)
             {
-                var lookup = value.Contains('\t') ? value.Split('\t')[0] : value;
-                lookup = lookup.Contains(' ') ? value.Split(' ')[0] : lookup;
+                var lookup = value.Replace('\t', ' ');
+                lookup = lookup.Contains(' ') ? lookup.Split(' ', StringSplitOptions.RemoveEmptyEntries)[0] : lookup;
 
-                var entry = lookup.StartsWith("0x")
-                    ? itemCfg.FirstOrDefault(x =>
-                        x.ContainsKey("DataElementId") && string.Equals(x["DataElementId"], lookup,
-                            StringComparison.InvariantCultureIgnoreCase))
-                    : itemCfg.FirstOrDefault(x =>
-                        x.ContainsKey("Name") &&
-                        string.Equals(x["Name"], lookup, StringComparison.InvariantCultureIgnoreCase));
+                var entry = PolData.ItemDesc.FirstOrDefault(x => 
+                    x != null && 
+                    x.ContainsKey("Name") &&
+                    x.ContainsKey("DataElementId") &&
+                    string.Equals(lookup.StartsWith("0x") ? x["DataElementId"] : x["Name"], lookup, StringComparison.InvariantCultureIgnoreCase)
+                );
 
                 if (entry != null)
                 {
                     equip.Add(entry);
                 }
                 // Add fake entries for implied ObjTypes below the MaxObjType limit (0x20000)
-                else if (lookup.StartsWith("0x") && System.Convert.ToInt32(lookup, 16) < 0x20000) 
+                else if (ToInt(lookup) < 0x20000)
                 {
-                    entry = new Dictionary<string, string>
+                    entry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                     {
-                        { "Graphic", lookup }
+                        {"Graphic", lookup}
                     };
 
                     var color = value.Replace(lookup, string.Empty);
@@ -209,7 +204,7 @@ namespace Pol2RunUO.Converters
                         color = color.Substring(0, commentIdx);
 
                     color = color.Trim();
-                    
+
                     Color c = Color.FromName(color);
                     if (c.IsKnownColor)
                     {
@@ -228,23 +223,6 @@ namespace Pol2RunUO.Converters
             return equip;
         }
 
-
-        private bool FindTypeForObjType(string value, out Type itemType)
-        {
-            int objType = value.StartsWith("0x") ? System.Convert.ToInt32(value, 16) : int.Parse(value);
-            foreach (var (type, attribute) in TypesWithFlippable)
-            {
-                if (attribute.ItemIDs != null && attribute.ItemIDs.Contains(objType))
-                {
-                    itemType = type;
-                    return true;
-                }
-            }
-
-            itemType = null;
-            return false;
-        }
-
         private void ProcessEquipFromItemDescEntries(List<Dictionary<string, string>> equipItems)
         {
             foreach (var item in equipItems)
@@ -253,20 +231,20 @@ namespace Pol2RunUO.Converters
                 if ((item.TryGetValue("graphic", out graphic) || item.TryGetValue("Graphic", out graphic)) &&
                     FindTypeForObjType(graphic, out var itemType))
                 {
-
-                    // if (graphic == "0x0ec4") // Skinning Knife
-                    //     continue;
-                    
                     string name;
 
                     var statements = new List<string>();
 
                     if (!item.TryGetValue("name", out name) && !item.TryGetValue("Name", out name))
                         name = itemType.Name;
-                    
+
                     name = char.ToLowerInvariant(name[0]) + name.Substring(1);
 
                     statements.Add($"AddItem(new {itemType.Name}");
+
+                    if (itemType.IsSubclassOf(typeof(Hair)))
+                        statements[0] = $"{statements[0]}(Utility.RandomHairHue())";
+
                     statements.Add("{");
 
                     void Add(string p, string s) => statements.Add($"    {p} = {s},");
@@ -274,22 +252,29 @@ namespace Pol2RunUO.Converters
 
                     foreach (var (prop, str) in item)
                     {
-                        var value = str.Trim();
+                        var value = CleanValue(str);
+
                         switch (prop.ToLowerInvariant())
                         {
                             case "desc":
-                                Add("Name",$"\"{value}\"");
+                                Add("Name", $"\"{value}\"");
                                 break;
                             case "color":
+                                if (string.IsNullOrEmpty(value))
+                                    break;
                                 Add("Hue", value);
                                 break;
                             case "ar":
-                                if(itemType.IsSubclassOf(typeof(BaseArmor)))
+                                if (itemType.IsSubclassOf(typeof(BaseArmor)))
                                     Add("BaseArmorRating", value);
                                 break;
                             case "maxhp":
-                                Add("MaxHitPoints", value);
-                                Add("HitPoints", value);
+                                if (itemType.IsSubclassOf(typeof(BaseArmor)) ||
+                                    itemType.IsSubclassOf(typeof(BaseWeapon)))
+                                {
+                                    Add("MaxHitPoints", value);
+                                    Add("HitPoints", value);
+                                }
                                 break;
                             case "speed":
                                 Add("Speed", value);
@@ -303,21 +288,21 @@ namespace Pol2RunUO.Converters
                                 Add("HitSound", value);
                                 break;
                             case "misssound":
-                                Add("MissSound" ,value);
+                                Add("MissSound", value);
                                 break;
                             case "anim":
-                                Add("Animation",$"(WeaponAnimation){value}");
+                                Add("Animation", $"(WeaponAnimation){value}");
                                 break;
                             case "attribute":
                                 if (SkillNames.Contains(value) && Enum.TryParse(value, true, out SkillName skill))
-                                    Add("Skill",$"SkillName.{skill}");
+                                    Add("Skill", $"SkillName.{skill}");
                                 break;
                             case "projectileanim":
                                 Add("EffectID", value);
                                 break;
-
                         }
                     }
+
                     statements.Add("});");
 
                     _equip.Add(name, statements);
@@ -325,19 +310,18 @@ namespace Pol2RunUO.Converters
             }
         }
 
-        private void ProcessNpcEquipEntry(List<Dictionary<string, string>> equipCfg,
-            List<Dictionary<string, string>> itemCfg)
+        private void ProcessNpcEquipEntry()
         {
             if (!_entry.TryGetValue("Equip", out string equipName))
                 return;
 
             var equipEntry =
-                equipCfg.FirstOrDefault(x => x.ContainsKey("DataElementId") && x["DataElementId"] == equipName);
+                PolData.Equip.FirstOrDefault(x => x.ContainsKey("DataElementId") && x["DataElementId"] == equipName);
 
             if (equipEntry == null)
                 return;
 
-            var equipItems = GetItemDescEntries(itemCfg, equipEntry.Values.ToList());
+            var equipItems = GetItemDescEntries(equipEntry.Values.ToList());
 
             var weapon = equipItems.FirstOrDefault(x =>
                 x.ContainsKey("DataElementType") &&
@@ -348,8 +332,8 @@ namespace Pol2RunUO.Converters
 
             if (virtualArmor != null)
             {
-                virtualArmor.TryGetValue("AR", out string armor);
-                _props.TryAdd("VirtualArmor", ToDigitString(armor));
+                if (virtualArmor.TryGetValue("AR", out string armor))
+                    _props.TryAdd("VirtualArmor", ToDigitString(armor));
             }
 
             if (weapon == null)
@@ -419,7 +403,7 @@ namespace Pol2RunUO.Converters
              	CProp	ChanceOfEffect	i50
 	            CProp	HitWithSpell	i90
 	            CProp	EffectCircle	i6
-             */
+            */
 
             double chance = -1;
             int spellId = -1;
@@ -440,19 +424,13 @@ namespace Pol2RunUO.Converters
             if (chance < 0 || spellId < 0)
                 return;
 
-            if (SpellRegistry.Count == 0)
-                Initializer.Initialize();
 
-            if (spellId <= 64)
-                spellId -= 1;
-            else if (spellId <= 80)
-                spellId += 35;
-            else if (spellId <= 96)
-                spellId += 519;
+            spellId = PolSpellIdToRunUO(spellId);
 
             chance /= 100;
 
-            var spellName = SpellRegistry.Types[spellId].ToString();
+            var spellName = SpellRegistry.SpellTypes[(SpellEntry) spellId].Name;
+
 
             _props.TryAdd("WeaponAbility", $"new SpellStrike<{spellName}>()");
             _props.TryAdd("WeaponAbilityChance", $"{chance}");
@@ -485,9 +463,16 @@ namespace Pol2RunUO.Converters
                 case "firebreather":
                     _props.TryAdd("HasBreath", "true");
                     break;
+                case "spellkillpcsTeleporter":
+                case "killpcsTeleporter":
+                    _props.TryAdd("TargetAcquireExhaustion", "true");
+                    break;
                 case "killpcsTeleporterfast":
+                    _props.TryAdd("TargetAcquireExhaustion", "true");
+                    goto case "fast";
                 case "killpcssprinters":
                 case "fastspiders":
+                case "fast":
                     _props.TryAdd("ActiveSpeed", "0.150");
                     _props.TryAdd("PassiveSpeed", "0.300");
                     break;
@@ -501,9 +486,17 @@ namespace Pol2RunUO.Converters
         private void ProcessNpcBaseValues()
         {
             _props.TryAdd("AlwaysAttackable", "true");
-            
-            foreach (var (key, value) in _entry)
+
+            foreach (var (key, x) in _entry)
             {
+                if (x == null)
+                    continue;
+
+                string value = x.Trim();
+                int commentIdx = value.IndexOf("//", StringComparison.Ordinal);
+                if (commentIdx > -1)
+                    value = value.Substring(0, commentIdx);
+
                 switch (key.ToLowerInvariant())
                 {
                     case "alignment":
@@ -528,9 +521,12 @@ namespace Pol2RunUO.Converters
                         break;
                     case "name":
                         _props.TryAdd("Name", $"\"{value}\"");
-                        _props.TryAdd("CorpseNameOverride", $"\"corpse of {value}\"".Replace("<random> the", "a"));
+                        _props.TryAdd("CorpseNameOverride", $"\"corpse of {value}\"");
                         break;
                     case "objtype":
+                        _props.TryAdd("Body", value);
+                        break;
+                    case "graphic":
                         _props.TryAdd("Body", value);
                         break;
                     case "color":
@@ -544,34 +540,46 @@ namespace Pol2RunUO.Converters
                     case "str":
                     case "dex":
                     case "int":
-                        _props.TryAdd(ToTitleCase(key.ToLower()), value);
+                        _props.TryAdd(ToTitleCase(key.ToLower()), ToDigitString(value));
                         break;
                     case "mana":
-                        _props.TryAdd("ManaMaxSeed", value);
+                        _props.TryAdd("ManaMaxSeed", ToDigitString(value));
                         break;
                     case "stam":
-                        _props.TryAdd("StamMaxSeed", value);
+                        _props.TryAdd("StamMaxSeed", ToDigitString(value));
                         break;
                     case "hits":
-                        _props.TryAdd("HitsMax", value);
+                        _props.TryAdd("HitsMax", ToDigitString(value));
                         break;
                     case "ar":
-                        _props.TryAdd("VirtualArmor", value);
+                        _props.TryAdd("VirtualArmor", ToDigitString(value));
                         break;
                     case "cprop_rise":
-                        if(NpcDescToClassName.TryGetValue(value.Trim().Substring(1), out var className))
+                        if (NpcDescToClassName.TryGetValue(value.Substring(1), out var className))
                             _props.TryAdd("RiseCreatureType", $"typeof({className})");
                         break;
                     case "cprop_risedelay":
                         _props.TryAdd("RiseCreatureDelay", $"TimeSpan.FromSeconds({ToDigitString(value)})");
                         break;
                     case "tameskill":
-                        _props.TryAdd("MinTameSkill", value);
+                        _props.TryAdd("MinTameSkill", ToDigitString(value));
                         _props.TryAdd("Tamable", "true");
+                        break;
+                    case "cprop_untamable":
+                        _props.TryAdd("Tamable", "false");
+                        break;
+                    case "provoke":
+                        _props.TryAdd("ProvokeSkillOverride", ToDigitString(value));
+                        break;
+                    case "cprop_unprovokable":
+                        _props.TryAdd("BardImmune", "true");
+                        break;
+                    case "saywords":
+                        _props.TryAdd("SaySpellMantra", value == "0" ? "false" : "true");
                         break;
                     case "deathsnd":
                     case "deathsound":
-                        int id = value.StartsWith("0x") ? System.Convert.ToInt32(value, 16) : int.Parse(value);
+                        var id = ToInt(value);
                         _props.TryAdd("BaseSoundID", (id - 5).ToString());
                         break;
                     case "attackdamage":
@@ -581,13 +589,39 @@ namespace Pol2RunUO.Converters
                         _props.TryAdd("DamageMax", $"{max}");
                         _props.TryAdd("DamageMin", $"{min}");
                         break;
+                    case "cprop_iswarrior":
+                        _props.TryAdd("ClassSpec", "SpecName.Warrior");
+                        goto case "classlevel";
+                    case "cprop_ismage":
+                        _props.TryAdd("ClassSpec", "SpecName.Mage");
+                        goto case "classlevel";
+                    case "cprop_isranger":
+                        _props.TryAdd("ClassSpec", "SpecName.Ranger");
+                        goto case "classlevel";
+                    case "classlevel":
+                        _props.TryAdd("ClassLevel", ToDigitString(value));
+                        break;
+                    // case "cprop_noloot":
+                    // case "noloot":
+                    //     _props.TryAdd("DeleteCorpseOnDeath", "true");
+                    //     break;
+                    case "cprop_type":
+                        _props.TryAdd("CreatureType", $"CreatureType.{value.Substring(1)}");
+                        break;
                     default:
                         if (ProtToResistance.TryGetValue(key, out ResistanceType resist))
                             _resistances.TryAdd(resist, GetResistanceLevel(value));
-                        else if (!TryAddSkill(key, value))
+                        else if (!TryAddSkill(key, value) && !TryAddSpell(key, value))
                             _props.TryAdd($"// {key}", value);
+
                         break;
                 }
+            }
+
+            if (TryGetHides(_entry["DataElementId"], out var hideType, out var hideQuantity))
+            {
+                _props.TryAdd("HideType", $"HideType.{hideType}");
+                _props.TryAdd("Hides", hideQuantity.ToString());
             }
 
             if (_skills.Any())
@@ -595,6 +629,9 @@ namespace Pol2RunUO.Converters
 
             if (_resistances.Any())
                 _props.TryAdd("Resistances", DictToString(_resistances));
+
+            if (_spells.Any())
+                _props.TryAdd("PreferredSpells", SpellListToString(_spells));
         }
 
         private bool TryAddSkill(string key, string value)
@@ -620,68 +657,39 @@ namespace Pol2RunUO.Converters
             return false;
         }
 
-        private static string DictToString<T>(Dictionary<T, string> dict)
+        private bool TryAddSpell(string key, string value)
         {
-            if (typeof(T) == typeof(string))
+            if (!key.Contains("spell", StringComparison.InvariantCultureIgnoreCase))
+                return false;
+
+            value = value.Replace("MassCast", string.Empty, StringComparison.InvariantCultureIgnoreCase);
+            value = value.Trim();
+
+            var spell = PolData.Spells.FirstOrDefault(x =>
             {
-                return string.Join(";\n", dict.Select(x => x.Key + "=" + x.Value));
+                return x.ContainsKey("Script") &&
+                       x["Script"].Contains(value, StringComparison.InvariantCultureIgnoreCase) ||
+                       x.ContainsKey("SpellScript") &&
+                       x["SpellScript"].Contains(value, StringComparison.InvariantCultureIgnoreCase);
+            });
+            
+
+            Type spellType;
+            if (spell != null)
+            {
+                int spellId = PolSpellIdToRunUO(ToInt(spell["DataElementId"]).Value);
+                spellType = SpellRegistry.SpellTypes[(SpellEntry) spellId];
+            }
+            else
+            {
+                spellType = SpellRegistry.SpellInfos.Keys.FirstOrDefault(x =>
+                    x != null && x.Name.Equals(value, StringComparison.InvariantCultureIgnoreCase));
             }
 
-            var output = new List<string>();
-            output.Add($"new Dictionary<{typeof(T).Name}, CreatureProp>");
-            output.Add("            {");
-            foreach (var (key, value) in dict)
-            {
-                output.Add($"                {{ {typeof(T).Name}.{key}, {value} }},");
-            }
+            if (spellType != null)
+                _spells.Add(spellType.ToString());
 
-            output.Add("            }");
-            return string.Join(Environment.NewLine, output);
-        }
-
-        private static string GetResistanceLevel(string value)
-        {
-            value = new string(value.Where(char.IsDigit).ToArray());
-
-            switch (value)
-            {
-                case "1":
-                    value = "25";
-                    break;
-                case "2":
-                    value = "50";
-                    break;
-                case "3":
-                    value = "75";
-                    break;
-                case "4":
-                case "5":
-                case "6":
-                case "7":
-                case "8":
-                    value = "100";
-                    break;
-            }
-
-            return value;
-        }
-
-        private static string GetPoison(string value)
-        {
-            var level = value switch
-            {
-                "1" => "Lesser",
-                "2" => "Regular",
-                "3" => "Regular",
-                "4" => "Greater",
-                "5" => "Greater",
-                "6" => "Deadly",
-                "7" => "Deadly",
-                "8" => "Lethal",
-                _ => "Regular"
-            };
-
-            return level;
+            return false;
         }
     }
 }
